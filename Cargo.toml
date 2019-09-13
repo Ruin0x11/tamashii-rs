@@ -1,0 +1,8 @@
+[package]
+authors = ["ruin0x11 <ipickering2@gmail.com>"]
+edition = "2018"
+name = "tamashii"
+version = "0.1.0"
+[dependencies]
+futures = "*"
+tokio = "0.1"
