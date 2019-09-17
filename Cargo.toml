@@ -4,5 +4,7 @@ edition = "2018"
 name = "tamashii"
 version = "0.1.0"
 [dependencies]
-futures = "*"
+bytes = "*"
+futures = "0.1"
+md5 = "*"
 tokio = "0.1"
