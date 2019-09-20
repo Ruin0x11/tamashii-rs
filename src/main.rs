@@ -2,19 +2,22 @@
 extern crate futures;
 extern crate tokio;
 
-use bytes::Bytes;
+use futures::future::{self, Either};
 use futures::sync::mpsc;
 use rand::Rng;
-use std::net::ToSocketAddrs;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::codec::{Decoder, Framed};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
+use tokio::timer::Delay;
 
 mod codec;
 
-use self::codec::daemon::{DaemonMsg, DaemonMsgCodec};
-use self::codec::server::{ServerMsg, ServerMsgCodec};
+use self::codec::daemon::*;
+use self::codec::peer::*;
+use self::codec::server::*;
 
 /// Shorthand for the transmit half of the message channel.
 type Tx = mpsc::UnboundedSender<ServerMsg>;
@@ -25,6 +28,7 @@ type Rx = mpsc::UnboundedReceiver<ServerMsg>;
 struct State {
     server_tx: Option<Tx>,
     token: u32,
+    logged_in: bool,
 }
 
 impl State {
@@ -32,6 +36,7 @@ impl State {
         State {
             server_tx: None,
             token: 0,
+            logged_in: false,
         }
     }
 
@@ -45,6 +50,33 @@ impl State {
     }
 }
 
+type PeerSocket = Framed<TcpStream, PeerMsgCodec>;
+
+struct SearchPeer {
+    username: String,
+    socket: PeerSocket,
+    addr: SocketAddr,
+    use_obfuscation: bool,
+}
+
+impl Future for SearchPeer {
+    type Item = ();
+    type Error = std::io::Error;
+    fn poll(&mut self) -> Poll<(), std::io::Error> {
+        while let Ok(Async::Ready(msg_opt)) = self.socket.poll() {
+            if let Some(msg) = msg_opt {
+                println!("RECV PEER msg {}: {:?}", self.username, msg);
+            } else {
+                println!("not ready");
+            }
+        }
+
+        try_ready!(self.socket.poll_complete());
+
+        Ok(Async::NotReady)
+    }
+}
+
 type ServerSocket = Framed<TcpStream, ServerMsgCodec>;
 
 struct Server {
@@ -54,10 +86,34 @@ struct Server {
 }
 
 impl Server {
-    pub fn new(socket: ServerSocket, state: Arc<Mutex<State>>) -> Self {
+    pub fn new(mut socket: ServerSocket, state: Arc<Mutex<State>>) -> Self {
         let (tx, rx) = mpsc::unbounded();
 
         state.lock().unwrap().server_tx = Some(tx);
+
+        socket
+            .start_send(ServerMsg::CSetListenPort {
+                port: 2234,
+                use_obfuscation: false,
+            })
+            .unwrap();
+
+        socket
+            .start_send(ServerMsg::CSharedFoldersFiles {
+                folders: 1,
+                files: 1,
+            })
+            .unwrap();
+
+        socket
+            .start_send(ServerMsg::CHaveNoParents { have_parents: true })
+            .unwrap();
+
+        socket
+            .start_send(ServerMsg::CSetStatus {
+                status: CSetStatusStatus::Online,
+            })
+            .unwrap();
 
         Server {
             state: state,
@@ -65,18 +121,124 @@ impl Server {
             socket: socket,
         }
     }
+
+    fn connect_to_peer(
+        &mut self,
+        username: String,
+        kind: SConnectToPeerKind,
+        ip: Ipv4Addr,
+        port: u32,
+        token: u32,
+        use_obfuscation: bool,
+        privileged: bool,
+        obfuscated_port: u32,
+    ) {
+        let port = if use_obfuscation {
+            obfuscated_port
+        } else {
+            port
+        };
+
+        let saddr = SocketAddrV4::new(ip, port as u16).into();
+        let state = self.state.clone();
+
+        println!("peer token {} {:#08x} {}", username, token, saddr);
+
+        match kind {
+            SConnectToPeerKind::Peer => {
+                let connection = TcpStream::connect(&saddr)
+                    .and_then(move |socket| {
+                        let framed = PeerMsgCodec::new().framed(socket);
+                        framed
+                            .send(PeerMsg::HPierceFirewall { token: token })
+                            .and_then(move |socket| {
+                                println!("Connected to peer {} {}", username, saddr);
+                                SearchPeer {
+                                    username: username,
+                                    socket: socket,
+                                    addr: saddr,
+                                    use_obfuscation: use_obfuscation,
+                                }
+                            })
+                    })
+                    .map_err(|e| eprintln!("peer connect error: {:?}", e));
+
+                tokio::spawn(connection);
+            }
+            SConnectToPeerKind::Distributed => {}
+            _ => (),
+        }
+    }
+}
+
+enum ServerResult {
+    ServerDisconnected,
+    UserDisconnected,
 }
 
 impl Future for Server {
-    type Item = ();
+    type Item = ServerResult;
     type Error = std::io::Error;
-    fn poll(&mut self) -> Poll<(), std::io::Error> {
+    fn poll(&mut self) -> Poll<ServerResult, std::io::Error> {
         while let Ok(Async::Ready(msg_opt)) = self.socket.poll() {
             if let Some(msg) = msg_opt {
-                println!("msg {:?}", msg);
+                println!("RECV SERVER msg: {:?}", msg);
+                match msg {
+                    ServerMsg::SLogin {
+                        success,
+                        greet,
+                        public_ip,
+                        unknown,
+                    } => {
+                        self.state.lock().unwrap().logged_in = success;
+                    }
+                    ServerMsg::SConnectToPeer {
+                        username,
+                        kind,
+                        ip,
+                        port,
+                        token,
+                        use_obfuscation,
+                        privileged,
+                        obfuscated_port,
+                    } => {
+                        self.connect_to_peer(
+                            username,
+                            kind,
+                            ip,
+                            port,
+                            token,
+                            use_obfuscation,
+                            privileged,
+                            obfuscated_port,
+                        );
+                    }
+                    ServerMsg::SNetInfo { users } => {
+                        for (user, (ip, port)) in users {
+                            println!("parent {}", ip);
+
+                            let token = self.state.lock().unwrap().next_token();
+
+                            self.socket
+                                .start_send(ServerMsg::CParentIp { ip: ip })
+                                .unwrap();
+
+                            self.connect_to_peer(
+                                user,
+                                SConnectToPeerKind::Distributed,
+                                ip,
+                                port,
+                                token,
+                                false,
+                                false,
+                                0,
+                            );
+                        }
+                    }
+                    _ => (),
+                }
             } else {
-                println!("server disconnect");
-                return Ok(Async::Ready(()));
+                return Ok(Async::Ready(ServerResult::ServerDisconnected));
             }
         }
 
@@ -90,8 +252,8 @@ impl Future for Server {
                     if i + 1 == 10 {
                         task::current().notify();
                     }
-                },
-                _ => break
+                }
+                _ => break,
             }
         }
 
@@ -196,7 +358,7 @@ impl Future for DaemonClient {
     }
 }
 
-fn server_task(state: Arc<Mutex<State>>) -> impl Future<Item = (), Error = ()> {
+fn server_task(state: Arc<Mutex<State>>) -> impl Future<Item = ServerResult, Error = ()> {
     let addr = "server.slsknet.org:2242";
 
     let saddr = addr.to_socket_addrs().unwrap().next().unwrap();
@@ -208,9 +370,12 @@ fn server_task(state: Arc<Mutex<State>>) -> impl Future<Item = (), Error = ()> {
             framed
                 .send(ServerMsg::CLogin {
                     username: "akeshi".into(),
-                    password: "password".into(),
+                    password: "bakamitai".into(),
                 })
-                .and_then(move |socket| Server::new(socket, state.clone()))
+                .and_then(move |socket| {
+                    println!("trying to connect to {}", &saddr);
+                    Server::new(socket, state.clone())
+                })
         })
         .map_err(|e| eprintln!("server error: {:?}", e))
 }
@@ -253,7 +418,9 @@ fn daemon_task(state: Arc<Mutex<State>>) -> impl Future<Item = (), Error = ()> {
             process_daemon_socket(socket, state.clone());
             Ok(())
         })
-        .map_err(|e| eprintln!("daemon error: {:?}", e))
+        .map_err(|e| {
+            eprintln!("daemon error: {:?}", e);
+        })
 }
 
 fn main() {
@@ -262,6 +429,25 @@ fn main() {
     let server = server_task(state.clone());
     let daemon = daemon_task(state.clone());
 
-    let task = server.join(daemon).map_err(|_| ()).map(|_| ());
+    let reconn = server.and_then(|result| {
+        match result {
+            ServerResult::ServerDisconnected => {
+                // try to reconnect
+                println!("server disconnected, trying to reconnect");
+                let reconnect_delay = 2000;
+                let when = Instant::now() + Duration::from_millis(reconnect_delay);
+                let cls = Delay::new(when)
+                    .map_err(|_| ())
+                    .and_then(move |_| server_task(state.clone()).map(|_| ()));
+                Either::A(cls)
+            }
+            ServerResult::UserDisconnected => {
+                // do nothing
+                Either::B(future::ok(()))
+            }
+        }
+    });
+
+    let task = reconn.join(daemon).map_err(|_| ()).map(|_| ());
     tokio::run(task);
 }

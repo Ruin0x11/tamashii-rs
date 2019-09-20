@@ -158,7 +158,6 @@ impl Decoder for DaemonMsgCodec {
         if self.cur_kind.is_none() {
             if buf.len() >= 4 {
                 self.cur_kind = Some(buf.split_to(4).into_buf().get_u32_le());
-                println!("kind {:?}", self.cur_kind);
             } else {
                 return Ok(None);
             }
@@ -177,21 +176,19 @@ impl Decoder for DaemonMsgCodec {
         self.cur_len = None;
         self.cur_kind = None;
 
-        let before = buf.len();
-
-        println!("DAEMON: kind: {:?}", kind);
+        let mut b = buf.split_to(len).into_buf();
 
         let result = match kind {
             0x0000 => {
-                let id = buf.split_to(4).into_buf().get_u32_le();
+                let id = b.get_u32_le();
 
                 Ok(Some(CPing { id: id }))
             }
             // 0x0001
             0x0002 => {
-                let algorithm = util::get_string(buf).into();
-                let challenge_response = util::get_string(buf);
-                let mask = buf.split_to(4).into_buf().get_u32_le();
+                let algorithm = util::get_string2(&mut b).into();
+                let challenge_response = util::get_string2(&mut b);
+                let mask = b.get_u32_le();
 
                 Ok(Some(CLogin {
                     algorithm: algorithm,
@@ -200,8 +197,8 @@ impl Decoder for DaemonMsgCodec {
                 }))
             }
             0x0401 => {
-                let kind = FromPrimitive::from_u32(buf.split_to(4).into_buf().get_u32_le()).unwrap();
-                let query = util::get_string(buf);
+                let kind = FromPrimitive::from_u32(b.get_u32_le()).unwrap();
+                let query = util::get_string2(&mut b);
 
                 Ok(Some(CSearch {
                     kind: kind,
@@ -215,11 +212,6 @@ impl Decoder for DaemonMsgCodec {
         };
 
         println!("DAEMON: get msg: {:?}", result);
-
-        let consumed = before - buf.len();
-        assert!(consumed <= len, "len: {} consumed: {}", len, consumed);
-        let left = len - consumed;
-        buf.advance(left);
 
         result
     }

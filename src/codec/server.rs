@@ -1,8 +1,46 @@
 use super::util;
 use bytes::{Buf, BufMut, BytesMut, IntoBuf};
-use std::net::Ipv4Addr;
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddrV4, SocketAddr};
 use std::result::Result;
 use tokio::codec::{Decoder, Encoder};
+use num_derive::FromPrimitive;
+use num_traits::FromPrimitive;
+
+#[derive(Debug)]
+pub enum SConnectToPeerKind {
+    Peer,
+    File,
+    Distributed,
+}
+
+impl From<SConnectToPeerKind> for String {
+    fn from(it: SConnectToPeerKind) -> String {
+        match it {
+            SConnectToPeerKind::Peer => "P",
+            SConnectToPeerKind::File => "F",
+            SConnectToPeerKind::Distributed => "D",
+        }
+        .into()
+    }
+}
+
+impl From<String> for SConnectToPeerKind {
+    fn from(it: String) -> SConnectToPeerKind {
+        match it.as_ref() {
+            "P" => SConnectToPeerKind::Peer,
+            "F" => SConnectToPeerKind::File,
+            "D" => SConnectToPeerKind::Distributed,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug, FromPrimitive)]
+pub enum CSetStatusStatus {
+    Online = 1,
+    Offline = 2,
+}
 
 #[derive(Debug)]
 pub enum ServerMsg {
@@ -38,8 +76,44 @@ pub enum ServerMsg {
         query: String,
     },
 
+    CHaveNoParents {
+        have_parents: bool,
+    },
+
+    CSharedFoldersFiles {
+        folders: u32,
+        files: u32,
+    },
+
+    CSetStatus {
+        status: CSetStatusStatus,
+    },
+
     CRelatedSearch {
         query: String,
+    },
+    SRelatedSearch {
+        query: String,
+        related_searches: HashMap<String, i32>,
+    },
+
+    CParentIp {
+        ip: Ipv4Addr
+    },
+
+    SConnectToPeer {
+        username: String,
+        kind: SConnectToPeerKind,
+        ip: Ipv4Addr,
+        port: u32,
+        token: u32,
+        use_obfuscation: bool,
+        privileged: bool,
+        obfuscated_port: u32,
+    },
+
+    SNetInfo {
+        users: HashMap<String, (Ipv4Addr, u32)>
     },
 
     SAckPrivateMessage(u32),
@@ -92,6 +166,8 @@ impl Encoder for ServerMsgCodec {
 
         let mut buf = BytesMut::new();
 
+        println!("SEND SERVER msg: {:?}", msg);
+
         match msg {
             CLogin { username, password } => {
                 let src = format!("{}{}", username, password);
@@ -126,10 +202,31 @@ impl Encoder for ServerMsgCodec {
                 buf.put_u32_le(token);
                 util::pack_string(&query, &mut buf);
             }
+            CSharedFoldersFiles { folders, files } => {
+                buf.put_u32_le(35);
+
+                buf.put_u32_le(folders);
+                buf.put_u32_le(files);
+            }
+            CHaveNoParents { have_parents } => {
+                buf.put_u32_le(71);
+
+                buf.put_u8(have_parents as u8);
+            }
+            CSetStatus { status } => {
+                buf.put_u32_le(71);
+
+                buf.put_u32_le(status as u32);
+            }
             CRelatedSearch { query } => {
                 buf.put_u32_le(153);
 
                 util::pack_string(&query, &mut buf);
+            }
+            CParentIp { ip } => {
+                buf.put_u32_le(153);
+
+                util::pack_ip(&ip, &mut buf);
             }
             _ => unreachable!(),
         }
@@ -150,8 +247,8 @@ macro_rules! unp_msg {
 }
 
 macro_rules! unp_integer_msg {
-    ($buf:ident, $kind:ident) => {{
-        Ok(Some($kind($buf.split_to(4).into_buf().get_u32_le())))
+    ($b:ident, $kind:ident) => {{
+        Ok(Some($kind($b.get_u32_le())))
     }};
 }
 
@@ -186,7 +283,6 @@ impl Decoder for ServerMsgCodec {
         if self.cur_kind.is_none() {
             if buf.len() >= 4 {
                 self.cur_kind = Some(buf.split_to(4).into_buf().get_u32_le());
-                println!("kind {:?}", self.cur_kind);
             } else {
                 return Ok(None);
             }
@@ -205,18 +301,16 @@ impl Decoder for ServerMsgCodec {
         self.cur_len = None;
         self.cur_kind = None;
 
-        let before = buf.len();
-
-        println!("kind: {:?} len: {:?}", kind, len);
+        let mut b = buf.split_to(len).into_buf();
 
         let result = match kind {
             1 => {
-                let success = buf.split_to(1).into_buf().get_u8() != 0;
-                let greet = util::get_string(buf);
+                let success = b.get_u8() != 0;
+                let greet = util::get_string2(&mut b);
 
                 let (public_ip, unknown) = if success {
-                    let public_ip = util::get_ip(buf);
-                    let unknown = buf.split_to(1).into_buf().get_u8() != 0;
+                    let public_ip = util::get_ip2(&mut b);
+                    let unknown = b.get_u8() != 0;
                     (Some(public_ip), Some(unknown))
                 } else {
                     (None, None)
@@ -231,11 +325,11 @@ impl Decoder for ServerMsgCodec {
             }
             // 2 => unp_msg!(kind, SSetListenPort),
             3 => {
-                let username = util::get_string(buf);
-                let ip = util::get_ip(buf);
-                let port = buf.split_to(1).into_buf().get_u32_le();
-                let use_obfuscation = buf.split_to(1).into_buf().get_u32_le() == 1;
-                let obfuscated_port = buf.split_to(1).into_buf().get_u16_le();
+                let username = util::get_string2(&mut b);
+                let ip = util::get_ip2(&mut b);
+                let port = b.get_u32_le();
+                let use_obfuscation = b.get_u32_le() == 1;
+                let obfuscated_port = b.get_u16_le();
 
                 Ok(Some(SGetPeerAddress {
                     username: username,
@@ -252,41 +346,76 @@ impl Decoder for ServerMsgCodec {
             15 => unp_string_msg!(buf, SLeaveRoom),
             16 => unp_msg!(kind, SUserJoinedRoom),
             17 => unp_msg!(kind, SUserLeftRoom),
-            18 => unp_msg!(kind, SConnectToPeer),
+            18 => {
+                let username = util::get_string2(&mut b);
+                let kind = util::get_string2(&mut b).into();
+                let ip = util::get_ip2(&mut b);
+                let port = b.get_u32_le();
+                let token = b.get_u32_le();
+                let use_obfuscation = b.get_u32_le() != 0;
+                let privileged = b.get_u8() == 1;
+                let obfuscated_port = b.get_u32_le();
+
+                Ok(Some(SConnectToPeer {
+                    username: username,
+                    kind: kind,
+                    ip: ip,
+                    port: port,
+                    token: token,
+                    use_obfuscation: use_obfuscation,
+                    privileged: privileged,
+                    obfuscated_port: obfuscated_port,
+                }))
+            }
             22 => unp_msg!(kind, SPrivateMessage),
-            23 => unp_integer_msg!(buf, SAckPrivateMessage),
+            23 => unp_integer_msg!(b, SAckPrivateMessage),
             26 => unp_msg!(kind, SFileSearch),
-            28 => unp_integer_msg!(buf, SSetStatus),
+            28 => unp_integer_msg!(b, SSetStatus),
             32 => unp_msg!(kind, SPing),
             34 => unp_msg!(kind, SSendSpeed),
-            35 => unp_msg!(kind, SSharedFoldersFiles),
+            // 35 => unp_msg!(kind, SSharedFoldersFiles),
             36 => unp_msg!(kind, SGetUserStats),
             41 => unp_msg!(kind, SKicked),
             42 => unp_msg!(kind, SUserSearch),
-            51 => unp_string_msg!(buf, SInterestAdd),
-            52 => unp_string_msg!(buf, SInterestRemove),
+            51 => unp_string_msg!(b, SInterestAdd),
+            52 => unp_string_msg!(b, SInterestRemove),
             54 => unp_msg!(kind, SGetRecommendations),
             56 => unp_msg!(kind, SGetGlobalRecommendations),
             57 => unp_msg!(kind, SUserInterests),
             64 => unp_msg!(kind, SRoomList),
             65 => unp_msg!(kind, SExactFileSearch),
-            66 => unp_string_msg!(buf, SGlobalMessage),
-            69 => unp_strings_msg!(buf, SPrivilegedUsers),
+            66 => unp_string_msg!(b, SGlobalMessage),
+            69 => unp_strings_msg!(b, SPrivilegedUsers),
             71 => unp_msg!(kind, SHaveNoParents),
             73 => unp_msg!(kind, SParentIP),
-            83 => unp_integer_msg!(buf, SParentMinSpeed),
-            84 => unp_integer_msg!(buf, SParentSpeedRatio),
-            86 => unp_integer_msg!(buf, SParentInactivityTimeout),
-            87 => unp_integer_msg!(buf, SSearchInactivityTimeout),
-            88 => unp_integer_msg!(buf, SMinParentsInCache),
-            90 => unp_integer_msg!(buf, SDistribAliveInterval),
-            91 => unp_string_msg!(buf, SAddPrivileged),
+            83 => unp_integer_msg!(b, SParentMinSpeed),
+            84 => unp_integer_msg!(b, SParentSpeedRatio),
+            86 => unp_integer_msg!(b, SParentInactivityTimeout),
+            87 => unp_integer_msg!(b, SSearchInactivityTimeout),
+            88 => unp_integer_msg!(b, SMinParentsInCache),
+            90 => unp_integer_msg!(b, SDistribAliveInterval),
+            91 => unp_string_msg!(b, SAddPrivileged),
             92 => unp_msg!(kind, SCheckPrivileges),
             // 93 => unp_msg!(kind, SSearchRequest),
             100 => unp_msg!(kind, SAcceptChildren),
-            102 => unp_msg!(kind, SNetInfo),
+            102 => {
+                let mut users = HashMap::new();
+
+                let count = b.get_u32_le();
+
+                for _ in 0..count {
+                    let user = util::get_string2(&mut b);
+                    let ip = util::get_ip2(&mut b);
+                    let port = b.get_u32_le();
+                    users.insert(user, (ip, port));
+                }
+
+                Ok(Some(SNetInfo {
+                    users: users
+                }))
+            }
             103 => unp_msg!(kind, SWishlistSearch),
-            104 => unp_integer_msg!(buf, SWishlistInterval),
+            104 => unp_integer_msg!(b, SWishlistInterval),
             110 => unp_msg!(kind, SGetSimilarUsers),
             111 => unp_msg!(kind, SGetItemRecommendations),
             112 => unp_msg!(kind, SGetItemSimilarUsers),
@@ -294,8 +423,8 @@ impl Decoder for ServerMsgCodec {
             114 => unp_msg!(kind, SRoomTickerAdd),
             115 => unp_msg!(kind, SRoomTickerRemove),
             116 => unp_msg!(kind, SSetRoomTicker),
-            117 => unp_string_msg!(buf, SInterestHatedAdd),
-            118 => unp_string_msg!(buf, SInterestHatedRemove),
+            117 => unp_string_msg!(b, SInterestHatedAdd),
+            118 => unp_string_msg!(b, SInterestHatedRemove),
             120 => unp_msg!(kind, SRoomSearch),
             121 => unp_msg!(kind, SSendUploadSpeed),
             122 => unp_msg!(kind, SUserPrivileges),
@@ -324,7 +453,22 @@ impl Decoder for ServerMsgCodec {
             150 => unp_msg!(kind, SAskPublicChat),
             151 => unp_msg!(kind, SStopPublicChat),
             152 => unp_msg!(kind, SPublicChat),
-            153 => unp_msg!(kind, SRelatedSearch),
+            153 => {
+                let query = util::get_string2(&mut b);
+                let count = b.get_u32_le();
+                let mut related_searches = HashMap::new();
+
+                for _ in 0..count {
+                    let term = util::get_string2(&mut b);
+                    let score = b.get_i32_le();
+                    related_searches.insert(term, score);
+                }
+
+                Ok(Some(SRelatedSearch {
+                    query: query,
+                    related_searches: related_searches,
+                }))
+            }
             1001 => unp_msg!(kind, SCannotConnect),
 
             _ => {
@@ -332,13 +476,6 @@ impl Decoder for ServerMsgCodec {
                 Ok(None)
             }
         };
-
-        println!("get msg: {:?}", result);
-
-        let consumed = before - buf.len();
-        assert!(consumed <= len, "len: {} consumed: {}", len, consumed);
-        let left = len - consumed;
-        buf.advance(left);
 
         result
     }
