@@ -1,11 +1,14 @@
 use super::util;
 use bytes::{Buf, BufMut, BytesMut, IntoBuf};
-use std::result::Result;
-use tokio::codec::{Decoder, Encoder};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
+use std::result::Result;
+use tokio::codec::{Decoder, Encoder};
+use log::*;
 
-#[derive(Debug)]
+use super::structs::FileEntry;
+
+#[derive(Clone, Debug)]
 pub enum CLoginAlgorithm {
     Sha1,
     Sha256,
@@ -34,14 +37,14 @@ impl From<String> for CLoginAlgorithm {
     }
 }
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Debug, FromPrimitive)]
 pub enum CSearchKind {
     Global = 0,
     Buddies = 1,
     Room = 2,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DaemonMsg {
     CPing {
         id: u32,
@@ -66,6 +69,11 @@ pub enum DaemonMsg {
         challenge: String,
     },
 
+    SServerState {
+        connected: bool,
+        username: String
+    },
+
     CSearch {
         kind: CSearchKind,
         query: String,
@@ -73,6 +81,16 @@ pub enum DaemonMsg {
     SSearch {
         query: String,
         token: u32,
+    },
+
+    SSearchReply {
+        token: u32,
+        username: String,
+        slots_free: bool,
+        average_speed: u32,
+        queue_length: u32,
+        results: Vec<FileEntry>,
+        locked_results: Vec<FileEntry>,
     },
 }
 
@@ -98,6 +116,8 @@ impl Encoder for DaemonMsgCodec {
         use DaemonMsg::*;
 
         let mut buf = BytesMut::new();
+        buf.reserve(4096);
+
         let mut code = 0;
 
         match msg {
@@ -123,11 +143,42 @@ impl Encoder for DaemonMsgCodec {
                 util::pack_string(&message, &mut buf);
                 util::pack_string(&challenge, &mut buf);
             }
+            SServerState { connected, username } => {
+                code = 0x0003;
+
+                buf.put_u8(connected as u8);
+                util::pack_string(&username, &mut buf);
+            }
             SSearch { query, token } => {
                 code = 0x0401;
 
                 util::pack_string(&query, &mut buf);
                 buf.put_u32_le(token);
+            }
+            SSearchReply {
+                token,
+                username,
+                slots_free,
+                average_speed,
+                queue_length,
+                results,
+                locked_results,
+            } => {
+                code = 0x0402;
+
+                buf.put_u32_le(token);
+                util::pack_string(&username, &mut buf);
+                buf.put_u8(slots_free as u8);
+                buf.put_u32_le(average_speed);
+                buf.put_u32_le(queue_length); // soulseek uses u64, but museek uses u32
+                buf.put_u32_le(results.len() as u32);
+                for entry in results.iter() {
+                    util::pack_file_entry(entry, &mut buf);
+                }
+                buf.put_u32_le(locked_results.len() as u32);
+                for entry in locked_results.iter() {
+                    util::pack_file_entry(entry, &mut buf);
+                }
             }
             _ => unreachable!(),
         }
@@ -135,7 +186,7 @@ impl Encoder for DaemonMsgCodec {
         bytes.put_u32_le(buf.len() as u32 + 4);
         bytes.put_u32_le(code);
         bytes.extend(buf);
-        println!("send {:?}", bytes);
+        trace!("send {:?}", bytes);
 
         Ok(())
     }
@@ -206,12 +257,12 @@ impl Decoder for DaemonMsgCodec {
                 }))
             }
             _ => {
-                eprintln!("Unknown daemon message {}", kind);
+                warn!("Unknown daemon message {}", kind);
                 Ok(None)
             }
         };
 
-        println!("DAEMON: get msg: {:?}", result);
+        debug!("DAEMON: get msg: {:?}", result);
 
         result
     }

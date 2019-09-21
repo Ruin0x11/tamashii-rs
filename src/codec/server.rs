@@ -6,6 +6,7 @@ use std::result::Result;
 use tokio::codec::{Decoder, Encoder};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
+use log::*;
 
 #[derive(Debug)]
 pub enum SConnectToPeerKind {
@@ -165,8 +166,9 @@ impl Encoder for ServerMsgCodec {
         use ServerMsg::*;
 
         let mut buf = BytesMut::new();
+        buf.reserve(4096);
 
-        println!("SEND SERVER msg: {:?}", msg);
+        debug!("SEND SERVER msg: {:?}", msg);
 
         match msg {
             CLogin { username, password } => {
@@ -233,7 +235,7 @@ impl Encoder for ServerMsgCodec {
 
         bytes.put_u32_le(buf.len() as u32);
         bytes.extend(buf);
-        println!("send {:?}", bytes);
+        trace!("send {:?}", bytes);
 
         Ok(())
     }
@@ -241,7 +243,7 @@ impl Encoder for ServerMsgCodec {
 
 macro_rules! unp_msg {
     ($kind:ident, $name:ident) => {{
-        println!("Unimplemented message {} ({})", stringify!($name), $kind);
+        warn!("Unimplemented message {} ({})", stringify!($name), $kind);
         Ok(None)
     }};
 }
@@ -254,14 +256,14 @@ macro_rules! unp_integer_msg {
 
 macro_rules! unp_string_msg {
     ($buf:ident, $kind:ident) => {{
-        println!("Unimplemented message {}", stringify!($kind));
+        warn!("Unimplemented message {}", stringify!($kind));
         Ok(None)
     }};
 }
 
 macro_rules! unp_strings_msg {
     ($buf:ident, $kind:ident) => {{
-        println!("Unimplemented message {}", stringify!($kind));
+        warn!("Unimplemented message {}", stringify!($kind));
         Ok(None)
     }};
 }
@@ -472,7 +474,7 @@ impl Decoder for ServerMsgCodec {
             1001 => unp_msg!(kind, SCannotConnect),
 
             _ => {
-                eprintln!("Unknown server message {}", kind);
+                warn!("Unknown server message {}", kind);
                 Ok(None)
             }
         };

@@ -2,6 +2,8 @@ use bytes::{Buf, BufMut, BytesMut, IntoBuf};
 use std::net::Ipv4Addr;
 use std::io::Read;
 
+use super::structs::FileEntry;
+
 pub fn pack_string(s: &str, bytes: &mut BytesMut) {
     bytes.put_u32_le(s.len() as u32);
     bytes.extend(s.as_bytes());
@@ -20,6 +22,16 @@ pub fn pack_path_string(s: &str, bytes: &mut BytesMut) {
 
 pub fn pack_ip(ip: &Ipv4Addr, bytes: &mut BytesMut) {
     bytes.extend(ip.octets().iter());
+}
+
+pub fn pack_file_entry(fe: &FileEntry, bytes: &mut BytesMut) {
+    pack_string(&fe.filename, bytes);
+    bytes.put_u64_le(fe.size);
+    pack_string(&fe.ext, bytes);
+    bytes.put_u32_le(fe.attrs.len() as u32);
+    for entry in fe.attrs.iter() {
+        bytes.put_u32_le(*entry);
+    }
 }
 
 pub fn get_string(bytes: &mut BytesMut) -> String {
