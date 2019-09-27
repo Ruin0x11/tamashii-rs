@@ -44,7 +44,7 @@ impl PeerMsgCodec {
             cur_key: None,
             cur_len: None,
             cur_kind: None,
-            use_obfuscation: false && use_obfuscation,
+            use_obfuscation: use_obfuscation,
         }
     }
 }
@@ -133,11 +133,20 @@ impl Encoder for PeerMsgCodec {
             obfuscate(&mut len_buf, &mut key, 4);
             bytes.extend(len_buf);
 
+            let mut kind_buf = BytesMut::new();
+            let kind_len;
             if use_u8 {
-                bytes.put_u8(kind as u8);
+                kind_buf.resize(1, 0);
+                kind_buf.put_u8(kind as u8);
+                kind_len = 1;
             } else {
-                bytes.put_u32_le(kind);
+                kind_buf.resize(4, 0);
+                kind_buf.put_u32_le(kind);
+                kind_len = 4;
             }
+
+            obfuscate(&mut kind_buf, &mut key, kind_len);
+            bytes.extend(kind_buf);
 
             obfuscate(&mut buf, &mut key, len);
             bytes.extend(buf);
