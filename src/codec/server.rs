@@ -354,8 +354,8 @@ impl Decoder for ServerMsgCodec {
                 let ip = util::get_ip2(&mut b);
                 let port = b.get_u32_le();
                 let token = b.get_u32_le();
-                let use_obfuscation = b.get_u32_le() != 0;
-                let privileged = b.get_u8() == 1;
+                let privileged = b.get_u32_le() != 0;
+                let use_obfuscation = b.get_u8() != 1;
                 let obfuscated_port = b.get_u32_le();
 
                 Ok(Some(SConnectToPeer {

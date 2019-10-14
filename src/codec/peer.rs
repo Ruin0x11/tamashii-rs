@@ -116,20 +116,15 @@ impl Encoder for PeerMsgCodec {
             _ => unreachable!(),
         }
 
-        if self.use_obfuscation {
+        if self.use_obfuscation && !use_u8 {
             let mut key = generate_obfuscation_key();
             bytes.extend(key.clone());
 
             let mut len_buf = BytesMut::new();
             len_buf.resize(4, 0);
             let len = buf.len();
-            let write_len = if use_u8 {
-                len as u32 + 1
-            } else {
-                len as u32 + 4
-            };
 
-            LittleEndian::write_u32(&mut len_buf, write_len);
+            LittleEndian::write_u32(&mut len_buf, len as u32);
             obfuscate(&mut len_buf, &mut key, 4);
             bytes.extend(len_buf);
 
@@ -154,6 +149,11 @@ impl Encoder for PeerMsgCodec {
             info!("obfuscated");
         } else {
             bytes.put_u32_le(buf.len() as u32);
+            if use_u8 {
+                bytes.put_u8(kind as u8);
+            } else {
+                bytes.put_u32_le(kind);
+            }
             bytes.extend(buf);
         }
 
@@ -252,6 +252,7 @@ impl Decoder for PeerMsgCodec {
         if self.use_obfuscation && self.cur_key.is_none() {
             if buf.len() >= 4 {
                 self.cur_key = Some(buf.split_to(4));
+                info!("key: {:?}", self.cur_key);
             } else {
                 return Ok(None);
             }
@@ -265,6 +266,7 @@ impl Decoder for PeerMsgCodec {
                 }
 
                 self.cur_len = Some(data.into_buf().get_u32_le() as usize);
+                info!("len: {:?}", self.cur_key);
             } else {
                 return Ok(None);
             }
@@ -281,6 +283,7 @@ impl Decoder for PeerMsgCodec {
                     let rest = buf.split_to(3);
                     data.extend(rest);
                 }
+                info!("kind: {:?}", self.cur_kind);
 
                 self.cur_kind = Some(data.into_buf().get_u32_le());
             } else {
@@ -474,5 +477,17 @@ mod test {
         let result = codec.decode(&mut bytes).unwrap().unwrap();
 
         assert_eq!(msg, result);
+    }
+
+    #[test]
+    fn test_decode2() {
+        let mut v = vec![];
+        let mut codec = PeerMsgCodec::new(true);
+
+        let mut f = std::fs::File::open("/home/ruin/build/zlib").unwrap();
+        f.read_to_end(&mut v);
+        let mut bytes = BytesMut::from(v);
+
+        let result = codec.decode(&mut bytes).unwrap().unwrap();
     }
 }

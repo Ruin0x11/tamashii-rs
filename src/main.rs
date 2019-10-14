@@ -193,18 +193,14 @@ impl Server {
                 let connection = TcpStream::connect(&saddr)
                     .and_then(move |socket| {
                         let framed = PeerMsgCodec::new(use_obfuscation).framed(socket);
-                        framed
-                            .send(PeerMsg::HPierceFirewall { token: token })
-                            .and_then(move |socket| {
-                                info!("Connected to peer {} {}", username, saddr);
-                                SearchPeer {
-                                    username: username,
-                                    socket: socket,
-                                    addr: saddr,
-                                    use_obfuscation: use_obfuscation,
-                                    state: state,
-                                }
-                            })
+                        info!("Connected to peer {} {}", username, saddr);
+                        SearchPeer {
+                            username: username,
+                            socket: framed,
+                            addr: saddr,
+                            use_obfuscation: use_obfuscation,
+                            state: state,
+                        }
                     })
                     .map_err(|e| error!("peer connect error: {:?}", e));
 
