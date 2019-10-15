@@ -177,7 +177,7 @@ impl Server {
         socket.start_send(
             ServerMsg::CFileSearch {
                 token: 123,
-                query: "deerhunter".into()
+                query: "squarepusher".into()
             }
         ).unwrap();
 
@@ -487,12 +487,8 @@ fn server_task(state: Arc<Mutex<State>>) -> impl Future<Item = ServerResult, Err
         .map_err(|e| error!("server error: {:?}", e))
 }
 
-fn listener_task(state: Arc<Mutex<State>>) -> impl Future<Item = (), Error = ()> {
-    let addr = "192.168.1.101:51673";
-    let saddr = addr.to_socket_addrs().unwrap().next().unwrap();
-    info!("listening for obfuscated peers on {:?}", saddr);
-
-    let use_obfuscation = true;
+fn listener_task(state: Arc<Mutex<State>>, port: u16, use_obfuscation: bool) -> impl Future<Item = (), Error = ()> {
+    let saddr = SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 101), port).into();
 
     TcpListener::bind(&saddr)
         .expect("failed to bind listener")
@@ -501,13 +497,18 @@ fn listener_task(state: Arc<Mutex<State>>) -> impl Future<Item = (), Error = ()>
             let saddr = socket.peer_addr().unwrap();
             info!("incoming peer: {:?}", saddr);
             let framed = PeerMsgCodec::new(use_obfuscation).framed(socket);
-            SearchPeer {
+            let peer = SearchPeer {
                 username: "asd".into(),
                 socket: framed,
                 addr: saddr,
                 use_obfuscation: use_obfuscation,
                 state: state.clone(),
             }
+            .map_err(|e| {
+                error!("listener error: {:?}", e);
+            });
+            tokio::spawn(peer);
+            Ok(())
         })
         .map_err(|e| {
             error!("listener error: {:?}", e);
@@ -566,7 +567,8 @@ fn main() {
 
     let server = server_task(state.clone());
     let daemon = daemon_task(state.clone());
-    let listener = listener_task(state.clone());
+    let listener = listener_task(state.clone(), 51672, false);
+    let obfs_listener = listener_task(state.clone(), 51673, true);
 
     let reconn = server.and_then(|result| {
         match result {
@@ -587,6 +589,6 @@ fn main() {
         }
     });
 
-    let task = reconn.join(daemon).join(listener).map_err(|_| ()).map(|_| ());
+    let task = reconn.join(daemon).join(listener).join(obfs_listener).map_err(|_| ()).map(|_| ());
     tokio::run(task);
 }
