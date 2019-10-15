@@ -146,7 +146,6 @@ impl Encoder for PeerMsgCodec {
             obfuscate(&mut buf, &mut key, len);
             bytes.extend(buf);
 
-            info!("obfuscated");
         } else {
             bytes.put_u32_le(buf.len() as u32);
             if use_u8 {
@@ -252,7 +251,6 @@ impl Decoder for PeerMsgCodec {
         if self.use_obfuscation && self.cur_key.is_none() {
             if buf.len() >= 4 {
                 self.cur_key = Some(buf.split_to(4));
-                info!("key: {:?}", self.cur_key);
             } else {
                 return Ok(None);
             }
@@ -266,7 +264,6 @@ impl Decoder for PeerMsgCodec {
                 }
 
                 self.cur_len = Some(data.into_buf().get_u32_le() as usize);
-                info!("len: {:?}", self.cur_key);
             } else {
                 return Ok(None);
             }
@@ -282,8 +279,11 @@ impl Decoder for PeerMsgCodec {
                 } else {
                     let rest = buf.split_to(3);
                     data.extend(rest);
+
+                    if self.use_obfuscation {
+                        obfuscate(&mut data, self.cur_key.as_mut().unwrap(), 4);
+                    }
                 }
-                info!("kind: {:?}", self.cur_kind);
 
                 self.cur_kind = Some(data.into_buf().get_u32_le());
             } else {
@@ -314,7 +314,6 @@ impl Decoder for PeerMsgCodec {
             let mut key = self.cur_key.clone().unwrap();
             self.cur_key = None;
 
-            info!("deobfuscated");
             obfuscate(&mut data, &mut key, len);
         }
 

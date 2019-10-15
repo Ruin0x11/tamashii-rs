@@ -330,7 +330,7 @@ impl Decoder for ServerMsgCodec {
                 let username = util::get_string2(&mut b);
                 let ip = util::get_ip2(&mut b);
                 let port = b.get_u32_le();
-                let use_obfuscation = b.get_u32_le() == 1;
+                let use_obfuscation = b.get_u32_le() != 1;
                 let obfuscated_port = b.get_u16_le();
 
                 Ok(Some(SGetPeerAddress {

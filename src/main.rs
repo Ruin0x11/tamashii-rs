@@ -27,6 +27,13 @@ type Tx<T> = mpsc::UnboundedSender<T>;
 /// Shorthand for the receive half of the message channel.
 type Rx<T> = mpsc::UnboundedReceiver<T>;
 
+// search peers apparently connect to the user after SConnectToPeer is sent; there is nothing the
+// client does to initiate the connection themselves.
+struct PendingPeer {
+    username: String,
+    use_obfuscation: bool,
+}
+
 struct State {
     server_tx: Option<Tx<ServerMsg>>,
     token: u32,
@@ -94,6 +101,7 @@ impl Future for SearchPeer {
                         queue_length,
                         locked_results,
                     } => {
+                        info!("Searhc: {:?}", results);
                         self.state.lock().unwrap().send_daemon_message_all(
                             DaemonMsg::SSearchReply {
                                 token: token,
@@ -137,8 +145,15 @@ impl Server {
 
         socket
             .start_send(ServerMsg::CSetListenPort {
-                port: 2234,
+                port: 51672,
                 use_obfuscation: false,
+            })
+            .unwrap();
+
+        socket
+            .start_send(ServerMsg::CSetListenPort {
+                port: 51673,
+                use_obfuscation: true,
             })
             .unwrap();
 
@@ -158,6 +173,13 @@ impl Server {
                 status: CSetStatusStatus::Online,
             })
             .unwrap();
+
+        socket.start_send(
+            ServerMsg::CFileSearch {
+                token: 123,
+                query: "deerhunter".into()
+            }
+        ).unwrap();
 
         Server {
             state: state,
@@ -185,26 +207,14 @@ impl Server {
             port
         };
 
-        let saddr = SocketAddrV4::new(ip, port as u16).into();
-        let state = self.state.clone();
+        // let saddr = SocketAddrV4::new(ip, port as u16).into();
 
         match kind {
             SConnectToPeerKind::Peer => {
-                let connection = TcpStream::connect(&saddr)
-                    .and_then(move |socket| {
-                        let framed = PeerMsgCodec::new(use_obfuscation).framed(socket);
-                        info!("Connected to peer {} {}", username, saddr);
-                        SearchPeer {
-                            username: username,
-                            socket: framed,
-                            addr: saddr,
-                            use_obfuscation: use_obfuscation,
-                            state: state,
-                        }
-                    })
-                    .map_err(|e| error!("peer connect error: {:?}", e));
-
-                tokio::spawn(connection);
+                let peer = PendingPeer {
+                    username: username,
+                    use_obfuscation: use_obfuscation,
+                };
             }
             SConnectToPeerKind::Distributed => {}
             _ => (),
@@ -477,6 +487,33 @@ fn server_task(state: Arc<Mutex<State>>) -> impl Future<Item = ServerResult, Err
         .map_err(|e| error!("server error: {:?}", e))
 }
 
+fn listener_task(state: Arc<Mutex<State>>) -> impl Future<Item = (), Error = ()> {
+    let addr = "192.168.1.101:51673";
+    let saddr = addr.to_socket_addrs().unwrap().next().unwrap();
+    info!("listening for obfuscated peers on {:?}", saddr);
+
+    let use_obfuscation = true;
+
+    TcpListener::bind(&saddr)
+        .expect("failed to bind listener")
+        .incoming()
+        .for_each(move |socket| {
+            let saddr = socket.peer_addr().unwrap();
+            info!("incoming peer: {:?}", saddr);
+            let framed = PeerMsgCodec::new(use_obfuscation).framed(socket);
+            SearchPeer {
+                username: "asd".into(),
+                socket: framed,
+                addr: saddr,
+                use_obfuscation: use_obfuscation,
+                state: state.clone(),
+            }
+        })
+        .map_err(|e| {
+            error!("listener error: {:?}", e);
+        })
+}
+
 static CHALLENGE_MAP: &'static str = "0123456789abcdef";
 
 fn challenge() -> String {
@@ -529,6 +566,7 @@ fn main() {
 
     let server = server_task(state.clone());
     let daemon = daemon_task(state.clone());
+    let listener = listener_task(state.clone());
 
     let reconn = server.and_then(|result| {
         match result {
@@ -549,6 +587,6 @@ fn main() {
         }
     });
 
-    let task = reconn.join(daemon).map_err(|_| ()).map(|_| ());
+    let task = reconn.join(daemon).join(listener).map_err(|_| ()).map(|_| ());
     tokio::run(task);
 }
